@@ -1,4 +1,8 @@
-#include <opencv2/opencv.hpp>
+#include <opencv2/core.hpp>
+#include <opencv2/imgproc.hpp>
+#include <opencv2/videoio.hpp>
+
+#include "src/D3D12StereoRenderer.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -79,13 +83,6 @@ struct Options {
     bool blurEnabled = true;
     bool dynswaveEnabled = true;
     bool debug = false;
-};
-
-struct MouseState {
-    int eyeWidth = 1;
-    int eyeHeight = 1;
-    double x01 = 0.5;
-    double y01 = 0.5;
 };
 
 struct FilterState {
@@ -255,7 +252,7 @@ Options parseArguments(int argc, char** argv) {
     if (options.blurOffsetPercent < 0 || options.blurOffsetPercent > 100) {
         throw std::invalid_argument("--blur-offset must be within [0, 100]");
     }
-    if (options.maxRings < 1 ||
+    if (options.maxRings < 1 || options.maxRings > 8 ||
         options.ringWidthPercent <= 0 || options.ringWidthPercent > 100) {
         throw std::invalid_argument("Invalid DynSWAVE ring count or width");
     }
@@ -314,20 +311,6 @@ void checkStereoFrames(const cv::Mat& left, const cv::Mat& right) {
             "Both videos must decode to equal-size 8-bit BGR frames"
         );
     }
-}
-
-void onMouse(int event, int x, int y, int, void* userdata) {
-    if (event != cv::EVENT_MOUSEMOVE || !userdata) return;
-
-    auto& mouse = *static_cast<MouseState*>(userdata);
-    const int localX = (x >= mouse.eyeWidth) ? (x - mouse.eyeWidth) : x;
-    const int px = std::clamp(localX, 0, mouse.eyeWidth - 1);
-    const int py = std::clamp(y, 0, mouse.eyeHeight - 1);
-
-    mouse.x01 = static_cast<double>(px) /
-        std::max(1, mouse.eyeWidth - 1);
-    mouse.y01 = static_cast<double>(py) /
-        std::max(1, mouse.eyeHeight - 1);
 }
 
 FilterState initializeFilter(const cv::Size& size, const Options& options) {
@@ -454,304 +437,6 @@ FrameParameters updateFilter(
         );
     }
     return result;
-}
-
-cv::Mat renderEye(
-    const cv::Mat& input,
-    const FilterState& state,
-    const Options& options,
-    const FrameParameters& parameters,
-    bool applyBlur,
-    bool applyDynSWAVE
-) {
-    cv::Mat output;
-
-    if (applyBlur && options.blurEnabled && state.currentSigma > 0.001) {
-        const double sigma = state.currentSigma;
-        const int kernel = 2 * static_cast<int>(std::ceil(2.0 * sigma)) + 1;
-        cv::GaussianBlur(
-            input, output,
-            cv::Size(kernel, kernel),
-            sigma, sigma,
-            cv::BORDER_REFLECT_101
-        );
-    } else {
-        output = input.clone();
-    }
-
-    // ROI always uses the unfiltered source image.
-    input.copyTo(output, state.roiMask);
-
-    if (!applyDynSWAVE || !options.dynswaveEnabled ||
-        parameters.gazeInsideRoi ||
-        parameters.opacity <= 0.0) {
-        return output;
-    }
-
-    const double spacing = state.thetaMax / options.maxRings;
-    if (spacing <= 0.0) return output;
-
-    cv::Mat ringMask = cv::Mat::zeros(input.size(), CV_8UC1);
-    const int ringWidthPixels = std::max(
-        1, cvRound(input.cols * options.ringWidthPercent / 100.0)
-    );
-
-    // The rings move inward with increasing phase. Their radii are
-    // angular distances from the ROI direction, projected onto the image.
-    for (int i = 1; i <= options.maxRings; ++i) {
-        const double angle = i * spacing - state.wavePhaseRadians;
-        if (angle <= 0.0 || angle > state.thetaMax) continue;
-
-        const int radiusPixels = cvRound(
-            std::tan(angle) * kEyeDistanceMeters / state.metersPerPixel
-        );
-        cv::circle(
-            ringMask,
-            state.roiCenter,
-            radiusPixels,
-            cv::Scalar(255),
-            ringWidthPixels,
-            cv::LINE_AA
-        );
-    }
-
-    ringMask.setTo(0, state.roiMask);
-
-    // Overlay only ring pixels; anti-aliased mask values scale alpha.
-    for (int y = 0; y < output.rows; ++y) {
-        const auto* maskRow = ringMask.ptr<std::uint8_t>(y);
-        auto* outputRow = output.ptr<cv::Vec3b>(y);
-
-        for (int x = 0; x < output.cols; ++x) {
-            const std::uint8_t coverage = maskRow[x];
-            if (coverage == 0) continue;
-
-            const float a = static_cast<float>(
-                parameters.opacity * coverage / 255.0
-            );
-            auto& pixel = outputRow[x];
-            pixel[0] = cv::saturate_cast<std::uint8_t>(
-                pixel[0] * (1.0f - a)
-            );
-            pixel[1] = cv::saturate_cast<std::uint8_t>(
-                pixel[1] * (1.0f - a)
-            );
-            pixel[2] = cv::saturate_cast<std::uint8_t>(
-                pixel[2] * (1.0f - a) + 255.0f * a
-            );
-        }
-    }
-
-    return output;
-}
-
-// ID 5: apply a fixed base Gaussian blur, plus stronger blur within moving
-// DynSWAVE bands. The band blur strength (but not the base) depends on
-// gaze distance. Unlike ID 2, these bands contain no red overlay.
-cv::Mat renderBlurWaveEye(
-    const cv::Mat& input,
-    const FilterState& state,
-    const Options& options,
-    const FrameParameters& parameters
-) {
-    if (!options.blurEnabled) return input.clone();
-
-    cv::Mat output;
-    if (options.baseBlurSigma > 0.0) {
-        cv::GaussianBlur(
-            input, output, cv::Size(0, 0),
-            options.baseBlurSigma, options.baseBlurSigma,
-            cv::BORDER_REFLECT_101
-        );
-    } else {
-        output = input.clone();
-    }
-
-    // Only the ROI is excluded from the constant baseline blur.
-    input.copyTo(output, state.roiMask);
-
-    // The wave vanishes when looking inside the ROI. Base blur remains.
-    if (!options.dynswaveEnabled || parameters.gazeInsideRoi) {
-        return output;
-    }
-
-    const double spacing = state.thetaMax / options.maxRings;
-    if (spacing <= 0.0) return output;
-
-    // Preserve the original width W as a full-strength core.
-    // Extend the band by W/2 on BOTH edges. Total visible width is 2W.
-    // Smoothstep fades from full wave blur to the constant base blur only
-    // in the newly added outer/inner transition regions.
-    const int bandWidthPixels = std::max(
-        1, cvRound(input.cols * options.ringWidthPercent / 100.0)
-    );
-    const double coreHalfWidth = bandWidthPixels * 0.5;
-    const double transitionWidth = bandWidthPixels * 0.5;
-    const double totalHalfWidth = coreHalfWidth + transitionWidth;
-
-    std::vector<int> ringRadii;
-    ringRadii.reserve(options.maxRings);
-    for (int i = 1; i <= options.maxRings; ++i) {
-        const double angle = i * spacing - state.wavePhaseRadians;
-        if (angle <= 0.0 || angle > state.thetaMax) continue;
-        ringRadii.push_back(cvRound(
-            std::tan(angle) * kEyeDistanceMeters / state.metersPerPixel
-        ));
-    }
-    if (ringRadii.empty()) return output;
-
-    cv::Mat bandMask = cv::Mat::zeros(input.size(), CV_8UC1);
-    for (int y = 0; y < input.rows; ++y) {
-        const auto* roiRow = state.roiMask.ptr<std::uint8_t>(y);
-        auto* maskRow = bandMask.ptr<std::uint8_t>(y);
-        const double dy = static_cast<double>(y - state.roiCenter.y);
-
-        for (int x = 0; x < input.cols; ++x) {
-            // Do not allow even the transition area into the ROI.
-            if (roiRow[x] != 0) continue;
-
-            const double dx = static_cast<double>(x - state.roiCenter.x);
-            const double radius = std::sqrt(dx * dx + dy * dy);
-            double distanceToBand = totalHalfWidth;
-
-            for (const int ringRadius : ringRadii) {
-                distanceToBand = std::min(
-                    distanceToBand,
-                    std::abs(radius - static_cast<double>(ringRadius))
-                );
-            }
-
-            if (distanceToBand <= coreHalfWidth) {
-                maskRow[x] = 255;
-            } else if (distanceToBand < totalHalfWidth) {
-                // 1 at the original band edge; 0 at the expanded edge.
-                const double t =
-                    (totalHalfWidth - distanceToBand) / transitionWidth;
-                const double alpha = t * t * (3.0 - 2.0 * t);
-                maskRow[x] = cv::saturate_cast<std::uint8_t>(
-                    255.0 * alpha
-                );
-            }
-        }
-    }
-    if (cv::countNonZero(bandMask) == 0) return output;
-
-    const double additionalSigma =
-        options.waveBlurExtraMin +
-        (options.waveBlurExtraMax - options.waveBlurExtraMin) *
-        parameters.gazeDistance01;
-    const double waveSigma = options.baseBlurSigma + additionalSigma;
-
-    cv::Mat strongerBlur;
-    cv::GaussianBlur(
-        input, strongerBlur, cv::Size(0, 0),
-        waveSigma, waveSigma, cv::BORDER_REFLECT_101
-    );
-
-    // Blend the stronger blur only in the bands. Use the antialiased
-    // coverage as alpha to avoid a hard edge at the annulus boundaries.
-    for (int y = 0; y < output.rows; ++y) {
-        const auto* mask = bandMask.ptr<std::uint8_t>(y);
-        const auto* strong = strongerBlur.ptr<cv::Vec3b>(y);
-        auto* base = output.ptr<cv::Vec3b>(y);
-        for (int x = 0; x < output.cols; ++x) {
-            if (mask[x] == 0) continue;
-            const float alpha = static_cast<float>(mask[x]) / 255.0f;
-            for (int channel = 0; channel < 3; ++channel) {
-                base[x][channel] = cv::saturate_cast<std::uint8_t>(
-                    (1.0f - alpha) * base[x][channel] +
-                    alpha * strong[x][channel]
-                );
-            }
-        }
-    }
-
-    return output;
-}
-
-// Only outside-ROI pixels are darkened, keeping the ROI unchanged.
-cv::Mat renderDarkenedEye(
-    const cv::Mat& input, const FilterState& state, double brightness
-) {
-    cv::Mat output;
-    input.convertTo(output, -1, brightness);
-    input.copyTo(output, state.roiMask);
-    return output;
-}
-
-void drawEyeMarker(cv::Mat& image, const cv::Point& gaze) {
-    cv::ellipse(
-        image, gaze, cv::Size(16, 9), 0, 0, 360,
-        cv::Scalar(0, 0, 0), 5, cv::LINE_AA
-    );
-    cv::ellipse(
-        image, gaze, cv::Size(16, 9), 0, 0, 360,
-        cv::Scalar(255, 255, 255), 2, cv::LINE_AA
-    );
-    cv::circle(
-        image, gaze, 6, cv::Scalar(0, 0, 255),
-        cv::FILLED, cv::LINE_AA
-    );
-    cv::circle(
-        image, gaze, 3, cv::Scalar(0, 0, 0),
-        cv::FILLED, cv::LINE_AA
-    );
-}
-
-cv::Mat makeDisplayFrame(
-    const cv::Mat& processedLeft,
-    const cv::Mat& processedRight,
-    const Options& options,
-    const FilterState& filter,
-    const FrameParameters& parameters,
-    FilterMode activeFilter,
-    Eye filterEye,
-    const cv::Point& gaze
-) {
-    cv::Mat left = processedLeft;
-    cv::Mat right = processedRight;
-
-    if (options.debug) {
-        left = left.clone();
-        right = right.clone();
-        drawEyeMarker(left, gaze);
-        drawEyeMarker(right, gaze);
-    }
-
-    cv::Mat combined;
-    cv::hconcat(left, right, combined);
-    if (!options.debug) return combined;
-
-    // Put debug status outside the image so it does not overwrite the ROI.
-    cv::Mat statusBar(36, combined.cols, CV_8UC3, cv::Scalar(25, 25, 25));
-    std::ostringstream status;
-    status << std::fixed << std::setprecision(2)
-           << "filter=" << static_cast<int>(activeFilter)
-           << " (" << filterName(activeFilter) << ")";
-    if (activeFilter == FilterMode::BlurWave) {
-        const double waveSigma =
-            options.baseBlurSigma + options.waveBlurExtraMin +
-            (options.waveBlurExtraMax - options.waveBlurExtraMin) *
-            parameters.gazeDistance01;
-        status << " baseSigma=" << options.baseBlurSigma
-               << " waveSigma=" << waveSigma;
-    } else {
-        status << " eye=" << eyeName(filterEye)
-               << " sigma=" << filter.currentSigma << " px";
-    }
-    status << " angle=" << (parameters.gazeAngleRadians * 180.0 / kPi)
-           << " deg speed=" << parameters.speedDegreesPerSecond
-           << " deg/s opacity=" << (parameters.opacity * 100.0) << "%";
-
-    cv::putText(
-        statusBar, status.str(), cv::Point(8, 24),
-        cv::FONT_HERSHEY_SIMPLEX, 0.55,
-        cv::Scalar(255, 255, 255), 1, cv::LINE_AA
-    );
-
-    cv::Mat display;
-    cv::vconcat(combined, statusBar, display);
-    return display;
 }
 
 }  // namespace
