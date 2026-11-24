@@ -18,24 +18,40 @@
 
 ## 要件
 
-- Windows 10/11、Visual Studio 2022（C++17）
+- Windows 10/11、Visual Studio 2022（C++17 / C++デスクトップ開発ワークロード）
 - CMake 3.21以上
-- OpenCV 4.x（`core`, `imgproc`, `highgui`, `videoio`）
-- `.h264` の再生には **FFmpeg対応でビルドされた OpenCV の Video I/O** が必要
+- Git とインターネット接続（初回のOpenCV取得用）
+- **vcpkgやOpenCVの事前インストールは不要**
 
-## ビルド（PowerShell）
+CMakeの`FetchContent`で **OpenCV 4.14.0** をGitHubからダウンロードし、必要なモジュール（`core`, `imgproc`, `highgui`, `videoio` とその依存モジュール）をソースから静的ビルドします。OpenCVの構成時にWindows用のFFmpegバックエンドも取得し、ビルド後に実行ファイルと同じフォルダへコピーします。
 
-vcpkgでOpenCVをインストールしている場合:
+## ビルド（PowerShell / vcpkg不要）
+
+Visual Studio 2022 のC++開発環境をインストールした状態で、リポジトリのルートから実行してください。
 
 ```powershell
-vcpkg install opencv4:x64-windows
+cmake -S . -B build-fetch -G "Visual Studio 17 2022" -A x64
 
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
-  -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
-cmake --build build --config Release
+cmake --build build-fetch --config Release --parallel 4
 ```
 
-vcpkgのインストール場所によっては `VCPKG_ROOT` を設定してください。OpenCVを別の方法で導入している場合は、`OpenCV_DIR` を渡しても構いません。
+**初回のCMake configureではOpenCVのダウンロードが発生します。** OpenCV本体のコンパイルも行うため、通常の小さなC++プログラムよりビルドに時間がかかります。2回目以降は、ソースとビルド結果が同じ`build-fetch/`内に残るため再利用されます。
+
+以前にvcpkg指定で作成した`build/`はCMakeキャッシュにツールチェーン情報が残ることがあるため、ここでは新しい`build-fetch/`を使用しています。
+
+```powershell
+.\build-fetch\Release\MicrosurgicalGuidanceFilterViewer.exe --help
+```
+
+### FFmpegとH.264入力について
+
+- `.h264` のデコードに必要なFFmpeg用DLLはOpenCVの構成時に別途ダウンロードされます。
+- CMakeではDLLの存在を検査し、ダウンロードできなかった場合はエラーとして通知します。
+- Releaseビルド後、`build-fetch/Release/`にアプリ本体と`opencv_videoio_ffmpeg4140_64.dll`が並ぶ構成です。
+- DLLを別の場所へ移動する場合は、実行ファイルと一緒に配置してください。
+- ダウンロードがネットワーク環境で遮断される場合、OpenCVやFFmpegの取得に失敗することがあります。その場合はCMakeの構成ログを確認してください。
+
+
 
 ## 実行例
 
