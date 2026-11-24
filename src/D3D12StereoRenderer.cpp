@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <climits>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -944,10 +945,14 @@ struct D3D12StereoRenderer::Impl {
         cb.ringCount = std::min(
             settings.ringCount, kMaxRings
         );
-        for (unsigned i = 0; i < 4; ++i) {
-            (&cb.radii0.x)[i] = settings.ringRadiiPixels[i];
-            (&cb.radii1.x)[i] = settings.ringRadiiPixels[i + 4];
-        }
+        cb.radii0.x = settings.ringRadiiPixels[0];
+        cb.radii0.y = settings.ringRadiiPixels[1];
+        cb.radii0.z = settings.ringRadiiPixels[2];
+        cb.radii0.w = settings.ringRadiiPixels[3];
+        cb.radii1.x = settings.ringRadiiPixels[4];
+        cb.radii1.y = settings.ringRadiiPixels[5];
+        cb.radii1.z = settings.ringRadiiPixels[6];
+        cb.radii1.w = settings.ringRadiiPixels[7];
 
         writeConstants(4, &cb, sizeof(cb));
         transition(result, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
