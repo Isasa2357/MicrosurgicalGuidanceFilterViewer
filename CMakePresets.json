@@ -9,10 +9,13 @@
     {
       "name": "vs2026",
       "displayName": "Visual Studio 2026 (x64)",
-      "description": "Fetch and build OpenCV without vcpkg using Visual Studio 2026",
+      "description": "Use native D3D12 and automatically fetch OpenCV for video decoding; VS 2026 Community",
       "generator": "Visual Studio 18 2026",
       "architecture": "x64",
-      "binaryDir": "${sourceDir}/build-vs2026"
+      "binaryDir": "${sourceDir}/build-vs2026-explicit",
+      "cacheVariables": {
+        "CMAKE_GENERATOR_INSTANCE": "C:/Program Files/Microsoft Visual Studio/18/Community"
+      }
     }
   ],
   "buildPresets": [
