@@ -1,0 +1,28 @@
+# Build artifacts
+build/
+out/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+*.obj
+*.pdb
+*.exe
+*.dll
+
+# IDE
+.vs/
+.vscode/
+.idea/
+
+# Recorded data (provide paths at runtime, do not commit)
+*.h264
+*.h265
+*.mp4
+*.avi
+*.mkv
+*.csv
+
+# Local experiment outputs
+logs/
+output/
+outputs/
