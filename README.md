@@ -43,6 +43,19 @@ cmake --build build-vs2026 --config Release --parallel 4
 
 **Visual Studio 2026のCMakeジェネレーターは `Visual Studio 18 2026` です。** `Visual Studio 19 2026` は存在しません。確認コマンドは `cmake --help` と `cmake --version` です。
 
+Visual Studio 2026がインストールされていてもCMakeがインスタンスを自動検出できない場合は、次のようにインストール先を明示します。
+
+```powershell
+cmake -S . -B build-vs2026-explicit -G "Visual Studio 18 2026" -A x64 `
+  "-DCMAKE_GENERATOR_INSTANCE=C:/Program Files/Microsoft Visual Studio/18/Community"
+
+cmake --build build-vs2026-explicit --config Release --parallel 16
+```
+
+### OpenCVのヘッダーエラーについて
+
+`opencv2/opencv_modules.hpp` はOpenCVのCMake構成時に**ビルドディレクトリ側へ生成されるヘッダー**です。このプロジェクトの `CMakeLists.txt` は、OpenCVのソース側と生成ヘッダー側の両方をincludeパスに指定します。以前の構成から更新した場合は `git pull` した後に上の `cmake -S . -B ...` を再実行し、設定を再生成してください。OpenCVのライブラリを最初からビルドし直す必要は通常ありません。
+
 初回はOpenCVの取得とコンパイルが必要です。2回目以降は同じ `build-vs2026/` の取得済みソース・ビルド結果を再利用します。
 
 以前に `build/` や `build-fetch/` で別のVisual Studioジェネレーターを使用した場合、CMakeキャッシュと競合することがあります。上記の `build-vs2026/` は独立した新規ビルドディレクトリです。
