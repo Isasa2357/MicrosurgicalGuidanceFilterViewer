@@ -18,36 +18,44 @@
 
 ## 要件
 
-- Windows 10/11、Visual Studio 2022（C++17 / C++デスクトップ開発ワークロード）
-- CMake 3.21以上
+- Windows 10/11、**Visual Studio 2026（C++デスクトップ開発ワークロード）**
+- **CMake 4.2以上**（Visual Studio 2026ジェネレーター対応版）
 - Git とインターネット接続（初回のOpenCV取得用）
 - **vcpkgやOpenCVの事前インストールは不要**
 
-CMakeの`FetchContent`で **OpenCV 4.14.0** をGitHubからダウンロードし、必要なモジュール（`core`, `imgproc`, `highgui`, `videoio` とその依存モジュール）をソースから静的ビルドします。OpenCVの構成時にWindows用のFFmpegバックエンドも取得し、ビルド後に実行ファイルと同じフォルダへコピーします。
+CMakeの`FetchContent`で **OpenCV 4.14.0** をGitHubからダウンロードし、必要なモジュール（`core`, `imgproc`, `highgui`, `videoio` とその依存モジュール）をソースから静的ビルドします。OpenCVの構成時にWindows用FFmpegバックエンドも取得します。
 
-## ビルド（PowerShell / vcpkg不要）
+## ビルド（PowerShell / Visual Studio 2026）
 
-Visual Studio 2022 のC++開発環境をインストールした状態で、リポジトリのルートから実行してください。
+リポジトリのルートで、追加した `CMakePresets.json` を使って実行します。
 
 ```powershell
-cmake -S . -B build-fetch -G "Visual Studio 17 2022" -A x64
-
-cmake --build build-fetch --config Release --parallel 4
+cmake --preset vs2026
+cmake --build --preset vs2026-release
 ```
 
-**初回のCMake configureではOpenCVのダウンロードが発生します。** OpenCV本体のコンパイルも行うため、通常の小さなC++プログラムよりビルドに時間がかかります。2回目以降は、ソースとビルド結果が同じ`build-fetch/`内に残るため再利用されます。
-
-以前にvcpkg指定で作成した`build/`はCMakeキャッシュにツールチェーン情報が残ることがあるため、ここでは新しい`build-fetch/`を使用しています。
+直接ジェネレーター名を指定する場合は、次の2コマンドでも同じ構成になります。
 
 ```powershell
-.\build-fetch\Release\MicrosurgicalGuidanceFilterViewer.exe --help
+cmake -S . -B build-vs2026 -G "Visual Studio 18 2026" -A x64
+cmake --build build-vs2026 --config Release --parallel 4
+```
+
+**Visual Studio 2026のCMakeジェネレーターは `Visual Studio 18 2026` です。** `Visual Studio 19 2026` は存在しません。確認コマンドは `cmake --help` と `cmake --version` です。
+
+初回はOpenCVの取得とコンパイルが必要です。2回目以降は同じ `build-vs2026/` の取得済みソース・ビルド結果を再利用します。
+
+以前に `build/` や `build-fetch/` で別のVisual Studioジェネレーターを使用した場合、CMakeキャッシュと競合することがあります。上記の `build-vs2026/` は独立した新規ビルドディレクトリです。
+
+```powershell
+.\build-vs2026\Release\MicrosurgicalGuidanceFilterViewer.exe --help
 ```
 
 ### FFmpegとH.264入力について
 
 - `.h264` のデコードに必要なFFmpeg用DLLはOpenCVの構成時に別途ダウンロードされます。
 - CMakeではDLLの存在を検査し、ダウンロードできなかった場合はエラーとして通知します。
-- Releaseビルド後、`build-fetch/Release/`にアプリ本体と`opencv_videoio_ffmpeg4140_64.dll`が並ぶ構成です。
+- Releaseビルド後、`build-vs2026/Release/`にアプリ本体と`opencv_videoio_ffmpeg4140_64.dll`が並ぶ構成です。
 - DLLを別の場所へ移動する場合は、実行ファイルと一緒に配置してください。
 - ダウンロードがネットワーク環境で遮断される場合、OpenCVやFFmpegの取得に失敗することがあります。その場合はCMakeの構成ログを確認してください。
 
@@ -56,7 +64,7 @@ cmake --build build-fetch --config Release --parallel 4
 ## 実行例
 
 ```powershell
-.\build\Release\MicrosurgicalGuidanceFilterViewer.exe `
+.\build-vs2026\Release\MicrosurgicalGuidanceFilterViewer.exe `
   --left  "logs\experiment01\experiment01_left_raw.h264" `
   --right "logs\experiment01\experiment01_right_raw.h264" `
   --fps 160 `
