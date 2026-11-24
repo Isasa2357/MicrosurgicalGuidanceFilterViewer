@@ -43,7 +43,15 @@ float4 PSMain(VSOutput input) : SV_Target0
     if (uv.x < 0 || uv.y < 0 || uv.x >= 1 || uv.y >= 1)
         return float4(0.0, 0.0, 0.0, 1.0);
 
-    float4 color = StereoImage.SampleLevel(LinearClamp, uv, 0);
+    // Sample each eye separately: bilinear filtering must never borrow
+    // pixels from the adjacent eye at the stereo midpoint.
+    float eyeIndex = uv.x < 0.5 ? 0.0 : 1.0;
+    float localU = frac(uv.x * 2.0);
+    localU = clamp(
+        localU, 0.5 / EyeSize.x, 1.0 - 0.5 / EyeSize.x
+    );
+    float2 safeUV = float2((eyeIndex + localU) * 0.5, uv.y);
+    float4 color = StereoImage.SampleLevel(LinearClamp, safeUV, 0);
 
     if (DebugMarker != 0)
     {
