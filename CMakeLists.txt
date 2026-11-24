@@ -68,16 +68,17 @@ target_compile_definitions(MicrosurgicalGuidanceFilterViewer PRIVATE
     NOMINMAX WIN32_LEAN_AND_MEAN
 )
 
-# Runtime HLSL compilation uses native Windows D3DCompileFromFile.
-# No third-party graphics helper, DirectXTK or CD3DX12 headers.
-add_custom_command(
-    TARGET MicrosurgicalGuidanceFilterViewer POST_BUILD
+# Runtime HLSL is compiled by D3DCompileFromFile.
+# Unlike POST_BUILD (which runs only on relinking), this always-run target
+# picks up shader-only edits on every invocation of the viewer build.
+add_custom_target(MicrosurgicalGuidanceShaders
     COMMAND "${CMAKE_COMMAND}" -E copy_directory
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders"
         "$<TARGET_FILE_DIR:MicrosurgicalGuidanceFilterViewer>/shaders"
-    COMMENT "Copying D3D12 HLSL shaders beside the executable"
+    COMMENT "Synchronizing runtime HLSL shaders"
     VERBATIM
 )
+add_dependencies(MicrosurgicalGuidanceFilterViewer MicrosurgicalGuidanceShaders)
 
 # OpenCV builds with the static MSVC runtime (/MT, /MTd) in this configuration.
 # Match that CRT on the viewer executable, otherwise linking fails with LNK2038.
