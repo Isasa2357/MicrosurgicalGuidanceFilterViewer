@@ -596,9 +596,21 @@ cv::Mat renderBlurWaveEye(
         );
     }
 
-    // Never apply a wave across the original-image ROI.
-    bandMask.setTo(0, state.roiMask);
+    // A line-antialiased mask alone produces a sharp boundary between
+    // base and wave blur. Feather the mask over several pixels instead,
+    // leaving the middle of each wave band mostly unaffected.
     if (cv::countNonZero(bandMask) == 0) return output;
+    const double featherSigma = std::clamp(
+        bandWidthPixels * 0.12, 2.0, 12.0
+    );
+    cv::GaussianBlur(
+        bandMask, bandMask, cv::Size(0, 0),
+        featherSigma, featherSigma,
+        cv::BORDER_REFLECT_101
+    );
+
+    // Clip after feathering so the softened wave never leaks into ROI.
+    bandMask.setTo(0, state.roiMask);
 
     const double additionalSigma =
         options.waveBlurExtraMin +
