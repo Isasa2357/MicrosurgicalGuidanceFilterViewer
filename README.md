@@ -56,6 +56,14 @@ cmake --build build-vs2026-explicit --config Release --parallel 16
 
 `opencv2/opencv_modules.hpp` はOpenCVのCMake構成時に**ビルドディレクトリ側へ生成されるヘッダー**です。このプロジェクトの `CMakeLists.txt` は、OpenCVのソース側と生成ヘッダー側の両方をincludeパスに指定します。以前の構成から更新した場合は `git pull` した後に上の `cmake -S . -B ...` を再実行し、設定を再生成してください。OpenCVのライブラリを最初からビルドし直す必要は通常ありません。
 
+### MSVCリンクエラー（LNK2038）について
+
+OpenCVを静的ビルドした場合、OpenCV側は静的MSVCランタイムの `/MT`（Debugでは `/MTd`）を使用します。アプリケーションが標準設定の `/MD` のままだと、リンク時に `RuntimeLibrary: MT_StaticRelease != MD_DynamicRelease` という `LNK2038` エラーが発生します。
+
+現在の `CMakeLists.txt` ではアプリケーション側も同じランタイムへ統一しています。アップデート後は**同じビルドディレクトリを維持したまま**CMakeの構成とビルドを再実行してください。通常、OpenCVのソースを再取得したり、ライブラリを再ビルドしたりする必要はありません。
+
+実行ファイルは `build-vs2026-explicit/Release/MicrosurgicalGuidanceFilterViewer.exe`（別のビルドフォルダの場合も `<ビルドフォルダ>/Release/`）へ出力するよう明示しています。FFmpeg用DLLも同じフォルダにコピーします。
+
 初回はOpenCVの取得とコンパイルが必要です。2回目以降は同じ `build-vs2026/` の取得済みソース・ビルド結果を再利用します。
 
 以前に `build/` や `build-fetch/` で別のVisual Studioジェネレーターを使用した場合、CMakeキャッシュと競合することがあります。上記の `build-vs2026/` は独立した新規ビルドディレクトリです。
