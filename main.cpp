@@ -444,17 +444,13 @@ FrameParameters updateFilter(
 int main(int argc, char** argv) {
     try {
         const Options options = parseArguments(argc, argv);
-
-        cv::VideoCapture leftCapture;
-        cv::VideoCapture rightCapture;
+        cv::VideoCapture leftCapture, rightCapture;
         openVideo(leftCapture, options.leftPath);
         openVideo(rightCapture, options.rightPath);
 
-        cv::Mat leftFrame;
-        cv::Mat rightFrame;
-        if (!leftCapture.read(leftFrame) || !rightCapture.read(rightFrame)) {
+        cv::Mat leftFrame, rightFrame;
+        if (!leftCapture.read(leftFrame) || !rightCapture.read(rightFrame))
             throw std::runtime_error("No decodable stereo frame found");
-        }
         resizeFrame(leftFrame, options.maxHeight);
         resizeFrame(rightFrame, options.maxHeight);
         checkStereoFrames(leftFrame, rightFrame);
@@ -462,32 +458,28 @@ int main(int argc, char** argv) {
         FilterState filter = initializeFilter(leftFrame.size(), options);
         FilterMode activeFilter = options.initialFilterMode;
         Eye filterEye = options.filterEye;
+        D3D12StereoRenderer renderer(
+            leftFrame.cols, leftFrame.rows,
+            static_cast<float>(options.roiX01),
+            static_cast<float>(options.roiY01),
+            L"Microsurgical Guidance Filter Viewer [D3D12]"
+        );
 
-        auto logFilter = [&]() {
+        const auto logFilter = [&]() {
             std::cout << "Filter ID " << static_cast<int>(activeFilter)
                       << " = " << filterName(activeFilter)
                       << " ; single-eye target: " << eyeName(filterEye)
                       << '\n';
         };
-
-        MouseState mouse;
-        mouse.eyeWidth = leftFrame.cols;
-        mouse.eyeHeight = leftFrame.rows;
-        mouse.x01 = options.roiX01;
-        mouse.y01 = options.roiY01;
-
         std::cout << "Left: " << options.leftPath << '\n'
                   << "Right: " << options.rightPath << '\n'
                   << "Playback FPS: " << options.fps << '\n'
                   << "Output per eye: " << leftFrame.cols << "x"
                   << leftFrame.rows << '\n'
-                  << "Reachable max sigma: " << filter.maximumSigma << " px\n"
-                  << "Mouse: simulated gaze (shared by both eyes)\n"
-                  << "Keys: 1-5 = filter, L/R = eye, Q/Esc = exit\n";
+                  << "D3D12: GPU filtering/compositing and DXGI display\n"
+                  << "OpenCV: decode, resize and BGR/RGBA conversion only\n"
+                  << "Keys: 1-5 filters; L/R target eye; Q/Esc quit\n";
         logFilter();
-
-        cv::namedWindow(kWindowName, cv::WINDOW_AUTOSIZE);
-        cv::setMouseCallback(kWindowName, onMouse, &mouse);
 
         using Clock = std::chrono::steady_clock;
         const auto playbackStart = Clock::now();
@@ -495,105 +487,105 @@ int main(int argc, char** argv) {
         std::uint64_t frameIndex = 0;
 
         for (;;) {
+            std::vector<int> keys;
+            bool quit = false;
+            renderer.pumpEvents(keys, quit);
+            if (quit) break;
+
+            bool changed = false;
+            for (const int key : keys) {
+                if (key == 27 || key == 'Q') { quit = true; break; }
+                if (key >= '1' && key <= '5') {
+                    const auto selected = static_cast<FilterMode>(key - '0');
+                    if (selected != activeFilter) {
+                        activeFilter = selected;
+                        filter.wavePhaseRadians = 0.0;
+                        changed = true;
+                    }
+                } else if (key == 'L' && filterEye != Eye::Left) {
+                    filterEye = Eye::Left;
+                    changed = true;
+                } else if (key == 'R' && filterEye != Eye::Right) {
+                    filterEye = Eye::Right;
+                    changed = true;
+                }
+            }
+            if (quit) break;
+            if (changed) logFilter();
+
             const auto now = Clock::now();
             const double dt = std::max(
                 0.0,
                 std::chrono::duration<double>(now - previousUpdate).count()
             );
             previousUpdate = now;
-
             const cv::Point gaze(
-                cvRound(mouse.x01 * (leftFrame.cols - 1)),
-                cvRound(mouse.y01 * (leftFrame.rows - 1))
+                cvRound(renderer.gazeX01() * (leftFrame.cols - 1)),
+                cvRound(renderer.gazeY01() * (leftFrame.rows - 1))
             );
-
-            const FrameParameters parameters = updateFilter(
+            const FrameParameters params = updateFilter(
                 filter, options, gaze, dt
             );
 
-            // ID 2: old bilateral guidance. IDs 3/4: one eye only.
-            cv::Mat processedLeft = leftFrame;
-            cv::Mat processedRight = rightFrame;
-            switch (activeFilter) {
-                case FilterMode::None:
-                    break;
-                case FilterMode::BlurAndDynSWAVE:
-                    processedLeft = renderEye(
-                        leftFrame, filter, options, parameters, true, true
-                    );
-                    processedRight = renderEye(
-                        rightFrame, filter, options, parameters, true, true
-                    );
-                    break;
-                case FilterMode::SingleEyeDarken:
-                    if (filterEye == Eye::Left) {
-                        processedLeft = renderDarkenedEye(
-                            leftFrame, filter, options.darkenBrightness
-                        );
-                    } else {
-                        processedRight = renderDarkenedEye(
-                            rightFrame, filter, options.darkenBrightness
-                        );
-                    }
-                    break;
-                case FilterMode::SingleEyeBlur:
-                    if (filterEye == Eye::Left) {
-                        processedLeft = renderEye(
-                            leftFrame, filter, options, parameters, true, false
-                        );
-                    } else {
-                        processedRight = renderEye(
-                            rightFrame, filter, options, parameters, true, false
-                        );
-                    }
-                    break;
-                case FilterMode::BlurWave:
-                    processedLeft = renderBlurWaveEye(
-                        leftFrame, filter, options, parameters
-                    );
-                    processedRight = renderBlurWaveEye(
-                        rightFrame, filter, options, parameters
-                    );
-                    break;
-            }
-
-            cv::imshow(
-                kWindowName,
-                makeDisplayFrame(
-                    processedLeft, processedRight,
-                    options, filter, parameters,
-                    activeFilter, filterEye, gaze
-                )
+            GpuFilterFrame frame{};
+            frame.filterId = static_cast<int>(activeFilter);
+            frame.filterEye = filterEye == Eye::Left ? 0 : 1;
+            frame.blurEnabled = options.blurEnabled;
+            frame.waveEnabled = options.dynswaveEnabled &&
+                                !params.gazeInsideRoi;
+            frame.debugMarker = options.debug;
+            frame.roiX = static_cast<float>(filter.roiCenter.x);
+            frame.roiY = static_cast<float>(filter.roiCenter.y);
+            frame.roiRadius = static_cast<float>(filter.roiRadiusPixels);
+            frame.darkenBrightness =
+                static_cast<float>(options.darkenBrightness);
+            frame.blurSigma = static_cast<float>(filter.currentSigma);
+            frame.baseBlurSigma = static_cast<float>(options.baseBlurSigma);
+            frame.strongBlurSigma = static_cast<float>(
+                options.baseBlurSigma + options.waveBlurExtraMin +
+                (options.waveBlurExtraMax - options.waveBlurExtraMin) *
+                params.gazeDistance01
             );
+            frame.ringWidthPixels = static_cast<float>(
+                leftFrame.cols * options.ringWidthPercent / 100.0
+            );
+            frame.redOpacity = static_cast<float>(params.opacity);
+            frame.gazeX01 = renderer.gazeX01();
+            frame.gazeY01 = renderer.gazeY01();
 
-            const int key = cv::waitKey(1) & 0xff;
-            if (key == 27 || key == 'q' || key == 'Q') break;
-            if (key >= '1' && key <= '5') {
-                const auto requestedMode = static_cast<FilterMode>(key - '0');
-                if (requestedMode != activeFilter) {
-                    activeFilter = requestedMode;
-                    filter.wavePhaseRadians = 0.0;
-                    logFilter();
-                }
-            } else if (key == 'l' || key == 'L') {
-                if (filterEye != Eye::Left) {
-                    filterEye = Eye::Left;
-                    logFilter();
-                }
-            } else if (key == 'r' || key == 'R') {
-                if (filterEye != Eye::Right) {
-                    filterEye = Eye::Right;
-                    logFilter();
+            const double spacing = filter.thetaMax / options.maxRings;
+            if (frame.waveEnabled && spacing > 0.0) {
+                for (int ring = 1; ring <= options.maxRings; ++ring) {
+                    const double angle =
+                        ring * spacing - filter.wavePhaseRadians;
+                    if (angle <= 0.0 || angle > filter.thetaMax) continue;
+                    frame.ringRadiiPixels[frame.ringCount++] =
+                        static_cast<float>(
+                            std::tan(angle) * kEyeDistanceMeters /
+                            filter.metersPerPixel
+                        );
                 }
             }
-            if (cv::getWindowProperty(
-                    kWindowName, cv::WND_PROP_VISIBLE) < 1.0) {
-                break;
-            }
 
-            // Keep playback aligned with the wall clock.
-            // Skip the same number of frames on both sources when behind.
-            const std::uint64_t nextIndex = frameIndex + 1;
+            if (changed || frameIndex == 0 ||
+                (options.debug && frameIndex % 24 == 0)) {
+                std::wostringstream title;
+                title << L"Microsurgical Guidance [D3D12] | ID "
+                      << static_cast<int>(activeFilter)
+                      << L" | target: "
+                      << (filterEye == Eye::Left ? L"left" : L"right");
+                if (options.debug) {
+                    title << std::fixed << std::setprecision(1)
+                          << L" | blur " << frame.blurSigma
+                          << L" | wave " << frame.strongBlurSigma
+                          << L" | speed " << params.speedDegreesPerSecond
+                          << L" deg/s";
+                }
+                renderer.setWindowTitle(title.str());
+            }
+            renderer.render(leftFrame, rightFrame, frame);
+
+            const auto nextIndex = frameIndex + 1;
             const auto deadline = playbackStart +
                 std::chrono::duration_cast<Clock::duration>(
                     std::chrono::duration<double>(
@@ -606,39 +598,31 @@ int main(int argc, char** argv) {
                 std::chrono::duration<double>(
                     Clock::now() - playbackStart
                 ).count();
-            const auto clockIndex = static_cast<std::uint64_t>(
-                std::floor(elapsedSeconds * options.fps)
+            const std::uint64_t targetIndex = std::max(
+                nextIndex, static_cast<std::uint64_t>(
+                    std::floor(elapsedSeconds * options.fps)
+                )
             );
-            const std::uint64_t targetIndex =
-                std::max(nextIndex, clockIndex);
-
-            bool finished = false;
-            for (std::uint64_t skipped = nextIndex;
-                 skipped < targetIndex; ++skipped) {
+            bool ended = false;
+            for (std::uint64_t index = nextIndex;
+                 index < targetIndex; ++index) {
                 if (!leftCapture.grab() || !rightCapture.grab()) {
-                    finished = true;
+                    ended = true;
                     break;
                 }
             }
-            if (finished) break;
+            if (ended || !leftCapture.read(leftFrame) ||
+                !rightCapture.read(rightFrame)) break;
 
-            if (!leftCapture.read(leftFrame) ||
-                !rightCapture.read(rightFrame)) {
-                break;
-            }
             resizeFrame(leftFrame, options.maxHeight);
             resizeFrame(rightFrame, options.maxHeight);
             checkStereoFrames(leftFrame, rightFrame);
             if (leftFrame.size() != filter.roiMask.size()) {
-                throw std::runtime_error(
-                    "Frame resolution changed during playback"
-                );
+                throw std::runtime_error("Video resolution changed");
             }
             frameIndex = targetIndex;
         }
-
-        cv::destroyAllWindows();
-        std::cout << "Playback ended.\n";
+        std::cout << "Playback finished.\n";
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << '\n';
