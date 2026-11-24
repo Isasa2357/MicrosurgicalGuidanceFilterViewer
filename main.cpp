@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -577,40 +578,63 @@ cv::Mat renderBlurWaveEye(
     const double spacing = state.thetaMax / options.maxRings;
     if (spacing <= 0.0) return output;
 
-    // Annular wave masks share the geometry and inward motion of ID 2.
-    cv::Mat bandMask = cv::Mat::zeros(input.size(), CV_8UC1);
+    // Preserve the original width W as a full-strength core.
+    // Extend the band by W/2 on BOTH edges. Total visible width is 2W.
+    // Smoothstep fades from full wave blur to the constant base blur only
+    // in the newly added outer/inner transition regions.
     const int bandWidthPixels = std::max(
         1, cvRound(input.cols * options.ringWidthPercent / 100.0)
     );
+    const double coreHalfWidth = bandWidthPixels * 0.5;
+    const double transitionWidth = bandWidthPixels * 0.5;
+    const double totalHalfWidth = coreHalfWidth + transitionWidth;
 
+    std::vector<int> ringRadii;
+    ringRadii.reserve(options.maxRings);
     for (int i = 1; i <= options.maxRings; ++i) {
         const double angle = i * spacing - state.wavePhaseRadians;
         if (angle <= 0.0 || angle > state.thetaMax) continue;
-
-        const int radiusPixels = cvRound(
+        ringRadii.push_back(cvRound(
             std::tan(angle) * kEyeDistanceMeters / state.metersPerPixel
-        );
-        cv::circle(
-            bandMask, state.roiCenter, radiusPixels,
-            cv::Scalar(255), bandWidthPixels, cv::LINE_AA
-        );
+        ));
     }
+    if (ringRadii.empty()) return output;
 
-    // A line-antialiased mask alone produces a sharp boundary between
-    // base and wave blur. Feather the mask over several pixels instead,
-    // leaving the middle of each wave band mostly unaffected.
+    cv::Mat bandMask = cv::Mat::zeros(input.size(), CV_8UC1);
+    for (int y = 0; y < input.rows; ++y) {
+        const auto* roiRow = state.roiMask.ptr<std::uint8_t>(y);
+        auto* maskRow = bandMask.ptr<std::uint8_t>(y);
+        const double dy = static_cast<double>(y - state.roiCenter.y);
+
+        for (int x = 0; x < input.cols; ++x) {
+            // Do not allow even the transition area into the ROI.
+            if (roiRow[x] != 0) continue;
+
+            const double dx = static_cast<double>(x - state.roiCenter.x);
+            const double radius = std::sqrt(dx * dx + dy * dy);
+            double distanceToBand = totalHalfWidth;
+
+            for (const int ringRadius : ringRadii) {
+                distanceToBand = std::min(
+                    distanceToBand,
+                    std::abs(radius - static_cast<double>(ringRadius))
+                );
+            }
+
+            if (distanceToBand <= coreHalfWidth) {
+                maskRow[x] = 255;
+            } else if (distanceToBand < totalHalfWidth) {
+                // 1 at the original band edge; 0 at the expanded edge.
+                const double t =
+                    (totalHalfWidth - distanceToBand) / transitionWidth;
+                const double alpha = t * t * (3.0 - 2.0 * t);
+                maskRow[x] = cv::saturate_cast<std::uint8_t>(
+                    255.0 * alpha
+                );
+            }
+        }
+    }
     if (cv::countNonZero(bandMask) == 0) return output;
-    const double featherSigma = std::clamp(
-        bandWidthPixels * 0.12, 2.0, 12.0
-    );
-    cv::GaussianBlur(
-        bandMask, bandMask, cv::Size(0, 0),
-        featherSigma, featherSigma,
-        cv::BORDER_REFLECT_101
-    );
-
-    // Clip after feathering so the softened wave never leaks into ROI.
-    bandMask.setTo(0, state.roiMask);
 
     const double additionalSigma =
         options.waveBlurExtraMin +
