@@ -1,5 +1,6 @@
 # Build artifacts
 build/
+build-fetch/
 out/
 cmake-build-*/
 CMakeFiles/
