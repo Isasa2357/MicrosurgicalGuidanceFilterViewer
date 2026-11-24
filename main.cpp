@@ -23,7 +23,8 @@ enum class FilterMode : int {
     None = 1,
     BlurAndDynSWAVE = 2,
     SingleEyeDarken = 3,
-    SingleEyeBlur = 4
+    SingleEyeBlur = 4,
+    BlurWave = 5
 };
 
 enum class Eye { Left, Right };
@@ -34,6 +35,7 @@ const char* filterName(FilterMode mode) {
         case FilterMode::BlurAndDynSWAVE: return "Blur+DynSWAVE (both eyes)";
         case FilterMode::SingleEyeDarken: return "Darken (single eye)";
         case FilterMode::SingleEyeBlur: return "Blur (single eye)";
+        case FilterMode::BlurWave: return "BlurWave (both eyes)";
     }
     return "Unknown";
 }
@@ -63,6 +65,11 @@ struct Options {
     double maximumOpacity = 0.50;
     double minimumSpeedDps = 5.0;
     double speedMultiplier = 6.0;
+
+    // ID 5: constant base blur; wave bands have stronger distance-dependent blur.
+    double baseBlurSigma = 3.0;
+    double waveBlurExtraMin = 2.0;
+    double waveBlurExtraMax = 10.0;
 
     FilterMode initialFilterMode = FilterMode::None;
     Eye filterEye = Eye::Left;
@@ -98,12 +105,13 @@ void printUsage() {
     std::cout
         << "Usage: MicrosurgicalGuidanceFilterViewer"
         << " --left LEFT.mp4 --right RIGHT.mp4 [options]\n\n"
-        << "Filter IDs (keys 1-4 during playback):\n"
+        << "Filter IDs (keys 1-5 during playback):\n"
         << "  1  None (both eyes unchanged; default)\n"
         << "  2  Blur + DynSWAVE on both eyes (original behavior)\n"
         << "  3  Darken outside ROI in one eye\n"
-        << "  4  Blur outside ROI in one eye\n\n"
-        << "  --filter-id N            Initial filter ID, 1..4 (default: 1)\n"
+        << "  4  Blur outside ROI in one eye\n"
+        << "  5  Constant base Blur + moving stronger-blur waves (both eyes)\n\n"
+        << "  --filter-id N            Initial filter ID, 1..5 (default: 1)\n"
         << "  --filter-eye left|right  Eye for filter 3/4 (default: left)\n"
         << "  --darken-brightness N    Outside ROI brightness % (default: 25)\n"
         << "  --fps N                  Playback FPS (default: 160)\n"
@@ -119,11 +127,14 @@ void printUsage() {
         << "  --max-opacity N          Maximum ring opacity in percent (default: 50)\n"
         << "  --min-speed N            Minimum ring speed in deg/s (default: 5)\n"
         << "  --speed-multiplier N     Maximum speed / minimum speed (default: 6)\n"
+        << "  --base-blur-sigma N      ID 5 constant base sigma [px] (default: 3)\n"
+        << "  --wave-blur-extra-min N  ID 5 min additional sigma [px] (default: 2)\n"
+        << "  --wave-blur-extra-max N  ID 5 max additional sigma [px] (default: 10)\n"
         << "  --no-blur                Disable Gaussian Blur\n"
         << "  --no-dynswave            Disable DynSWAVE\n"
         << "  --debug                  Display eye markers and status information\n"
         << "  --help                   Show this help\n\n"
-        << "Keys 1-4: switch filter. L / R: choose eye for filter 3/4.\n"
+        << "Keys 1-5: switch filter. L / R: choose eye for filter 3/4.\n"
         << "Mouse: simulated gaze shared by both eyes. Q / Esc: quit.\n";
 }
 
@@ -146,8 +157,8 @@ int parseInteger(const std::string& value) {
 }
 
 FilterMode parseFilterMode(int id) {
-    if (id < 1 || id > 4) {
-        throw std::invalid_argument("Filter ID must be in [1,4]");
+    if (id < 1 || id > 5) {
+        throw std::invalid_argument("Filter ID must be in [1,5]");
     }
     return static_cast<FilterMode>(id);
 }
@@ -203,6 +214,12 @@ Options parseArguments(int argc, char** argv) {
             options.minimumSpeedDps = parseReal(next());
         } else if (option == "--speed-multiplier") {
             options.speedMultiplier = parseReal(next());
+        } else if (option == "--base-blur-sigma") {
+            options.baseBlurSigma = parseReal(next());
+        } else if (option == "--wave-blur-extra-min") {
+            options.waveBlurExtraMin = parseReal(next());
+        } else if (option == "--wave-blur-extra-max") {
+            options.waveBlurExtraMax = parseReal(next());
         } else if (option == "--no-blur") {
             options.blurEnabled = false;
         } else if (option == "--no-dynswave") {
@@ -251,6 +268,17 @@ Options parseArguments(int argc, char** argv) {
     }
     if (options.darkenBrightness < 0 || options.darkenBrightness > 1) {
         throw std::invalid_argument("--darken-brightness must be in [0,100]");
+    }
+    if (options.baseBlurSigma < 0.0 || options.baseBlurSigma > 100.0) {
+        throw std::invalid_argument("--base-blur-sigma must be in [0,100]");
+    }
+    if (options.waveBlurExtraMin <= 0.0 ||
+        options.waveBlurExtraMax < options.waveBlurExtraMin ||
+        options.baseBlurSigma + options.waveBlurExtraMax > 100.0) {
+        throw std::invalid_argument(
+            "Wave blur requires 0 < extra-min <= extra-max and "
+            "(base sigma + extra-max) <= 100 px"
+        );
     }
     return options;
 }
@@ -354,6 +382,7 @@ FilterState initializeFilter(const cv::Size& size, const Options& options) {
 struct FrameParameters {
     bool gazeInsideRoi = true;
     double gazeAngleRadians = 0.0;
+    double gazeDistance01 = 0.0;
     double opacity = 0.0;
     double speedDegreesPerSecond = 0.0;
 };
@@ -405,6 +434,7 @@ FrameParameters updateFilter(
             0.0, 1.0
         )
         : 0.0;
+    result.gazeDistance01 = normalizedDistance;
 
     result.opacity = options.minimumOpacity +
         (options.maximumOpacity - options.minimumOpacity) *
@@ -634,7 +664,7 @@ int main(int argc, char** argv) {
                   << leftFrame.rows << '\n'
                   << "Reachable max sigma: " << filter.maximumSigma << " px\n"
                   << "Mouse: simulated gaze (shared by both eyes)\n"
-                  << "Keys: 1-4 = filter, L/R = eye, Q/Esc = exit\n";
+                  << "Keys: 1-5 = filter, L/R = eye, Q/Esc = exit\n";
         logFilter();
 
         cv::namedWindow(kWindowName, cv::WINDOW_AUTOSIZE);
@@ -711,7 +741,7 @@ int main(int argc, char** argv) {
 
             const int key = cv::waitKey(1) & 0xff;
             if (key == 27 || key == 'q' || key == 'Q') break;
-            if (key >= '1' && key <= '4') {
+            if (key >= '1' && key <= '5') {
                 const auto requestedMode = static_cast<FilterMode>(key - '0');
                 if (requestedMode != activeFilter) {
                     activeFilter = requestedMode;
