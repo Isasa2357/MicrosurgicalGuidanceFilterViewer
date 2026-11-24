@@ -56,6 +56,22 @@ endforeach()
 
 add_executable(MicrosurgicalGuidanceFilterViewer main.cpp)
 
+# OpenCV builds with the static MSVC runtime (/MT, /MTd) in this configuration.
+# Match that CRT on the viewer executable, otherwise linking fails with LNK2038.
+# In particular, using BUILD_SHARED_LIBS=OFF does not automatically set /MT
+# on the consumer executable.
+if(MSVC)
+    set_property(TARGET MicrosurgicalGuidanceFilterViewer PROPERTY
+        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+    )
+endif()
+
+# OpenCV sets a global EXECUTABLE_OUTPUT_PATH under <build>/bin.
+# Override it for our viewer so documented paths remain <build>/Release/*.exe.
+set_target_properties(MicrosurgicalGuidanceFilterViewer PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+)
+
 # OpenCV's build-tree module targets use PRIVATE include paths, so consumers
 # in a parent FetchContent project must explicitly include public module headers.
 # OPENCV_CONFIG_FILE_INCLUDE_DIR points to the build-generated headers,
