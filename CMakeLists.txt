@@ -2,6 +2,10 @@ cmake_minimum_required(VERSION 3.21)
 
 project(MicrosurgicalGuidanceFilterViewer LANGUAGES C CXX)
 
+if(NOT WIN32)
+    message(FATAL_ERROR "This D3D12 viewer requires Windows and the Windows SDK")
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -16,7 +20,7 @@ set(_opencv_version "4.14.0")
 # Only build what this viewer needs (and OpenCV's required dependencies).
 # Static OpenCV modules avoid opencv_*.dll runtime dependencies.
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build OpenCV as static libraries" FORCE)
-set(BUILD_LIST "core,imgproc,highgui,videoio" CACHE STRING "OpenCV modules" FORCE)
+set(BUILD_LIST "core,imgproc,videoio" CACHE STRING "OpenCV modules" FORCE)
 set(BUILD_opencv_world OFF CACHE BOOL "" FORCE)
 set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(BUILD_PERF_TESTS OFF CACHE BOOL "" FORCE)
@@ -46,7 +50,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(opencv)
 
-foreach(_module IN ITEMS core imgproc highgui videoio)
+foreach(_module IN ITEMS core imgproc videoio)
     if(NOT TARGET opencv_${_module})
         message(FATAL_ERROR
             "OpenCV module opencv_${_module} was not built. "
@@ -54,7 +58,26 @@ foreach(_module IN ITEMS core imgproc highgui videoio)
     endif()
 endforeach()
 
-add_executable(MicrosurgicalGuidanceFilterViewer main.cpp)
+add_executable(MicrosurgicalGuidanceFilterViewer
+    main.cpp
+    src/D3D12StereoRenderer.hpp
+    src/D3D12StereoRenderer.cpp
+)
+
+target_compile_definitions(MicrosurgicalGuidanceFilterViewer PRIVATE
+    NOMINMAX WIN32_LEAN_AND_MEAN
+)
+
+# Runtime HLSL compilation uses native Windows D3DCompileFromFile.
+# No third-party graphics helper, DirectXTK or CD3DX12 headers.
+add_custom_command(
+    TARGET MicrosurgicalGuidanceFilterViewer POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_directory
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders"
+        "$<TARGET_FILE_DIR:MicrosurgicalGuidanceFilterViewer>/shaders"
+    COMMENT "Copying D3D12 HLSL shaders beside the executable"
+    VERBATIM
+)
 
 # OpenCV builds with the static MSVC runtime (/MT, /MTd) in this configuration.
 # Match that CRT on the viewer executable, otherwise linking fails with LNK2038.
@@ -89,14 +112,18 @@ target_include_directories(MicrosurgicalGuidanceFilterViewer SYSTEM PRIVATE
     "${opencv_SOURCE_DIR}/modules/imgproc/include"
     "${opencv_SOURCE_DIR}/modules/imgcodecs/include"
     "${opencv_SOURCE_DIR}/modules/videoio/include"
-    "${opencv_SOURCE_DIR}/modules/highgui/include"
 )
 
 target_link_libraries(MicrosurgicalGuidanceFilterViewer PRIVATE
     opencv_core
     opencv_imgproc
-    opencv_highgui
     opencv_videoio
+    d3d12
+    dxgi
+    d3dcompiler
+    dxguid
+    user32
+    gdi32
 )
 
 if(WIN32)
