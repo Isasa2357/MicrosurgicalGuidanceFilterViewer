@@ -576,6 +576,13 @@ struct D3D12StereoRenderer::Impl {
 
         if (width != windowWidth || height != windowHeight) {
             waitForGpu();
+            // A closed command list can keep indirect references to the
+            // old backbuffers; reset it before releasing those resources.
+            check(commandAllocator->Reset(), "Reset allocator for resize");
+            check(commandList->Reset(
+                commandAllocator.Get(), nullptr
+            ), "Reset command list for resize");
+            check(commandList->Close(), "Close command list for resize");
             for (auto& surface : backBuffers) surface.Reset();
             check(swapchain->ResizeBuffers(
                 kBackBufferCount, width, height,
