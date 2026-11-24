@@ -1,7 +1,9 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 #include <windowsx.h>
 
@@ -356,7 +358,7 @@ struct D3D12StereoRenderer::Impl {
         windowClass.lpfnWndProc = windowProc;
         windowClass.hInstance = GetModuleHandleW(nullptr);
         windowClass.lpszClassName = kWindowClass;
-        windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        windowClass.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
         windowClass.hbrBackground = reinterpret_cast<HBRUSH>(
             GetStockObject(BLACK_BRUSH)
         );
