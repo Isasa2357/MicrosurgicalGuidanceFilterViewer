@@ -544,6 +544,95 @@ cv::Mat renderEye(
     return output;
 }
 
+// ID 5: apply a fixed base Gaussian blur, plus stronger blur within moving
+// DynSWAVE bands. The band blur strength (but not the base) depends on
+// gaze distance. Unlike ID 2, these bands contain no red overlay.
+cv::Mat renderBlurWaveEye(
+    const cv::Mat& input,
+    const FilterState& state,
+    const Options& options,
+    const FrameParameters& parameters
+) {
+    if (!options.blurEnabled) return input.clone();
+
+    cv::Mat output;
+    if (options.baseBlurSigma > 0.0) {
+        cv::GaussianBlur(
+            input, output, cv::Size(0, 0),
+            options.baseBlurSigma, options.baseBlurSigma,
+            cv::BORDER_REFLECT_101
+        );
+    } else {
+        output = input.clone();
+    }
+
+    // Only the ROI is excluded from the constant baseline blur.
+    input.copyTo(output, state.roiMask);
+
+    // The wave vanishes when looking inside the ROI. Base blur remains.
+    if (!options.dynswaveEnabled || parameters.gazeInsideRoi) {
+        return output;
+    }
+
+    const double spacing = state.thetaMax / options.maxRings;
+    if (spacing <= 0.0) return output;
+
+    // Annular wave masks share the geometry and inward motion of ID 2.
+    cv::Mat bandMask = cv::Mat::zeros(input.size(), CV_8UC1);
+    const int bandWidthPixels = std::max(
+        1, cvRound(input.cols * options.ringWidthPercent / 100.0)
+    );
+
+    for (int i = 1; i <= options.maxRings; ++i) {
+        const double angle = i * spacing - state.wavePhaseRadians;
+        if (angle <= 0.0 || angle > state.thetaMax) continue;
+
+        const int radiusPixels = cvRound(
+            std::tan(angle) * kEyeDistanceMeters / state.metersPerPixel
+        );
+        cv::circle(
+            bandMask, state.roiCenter, radiusPixels,
+            cv::Scalar(255), bandWidthPixels, cv::LINE_AA
+        );
+    }
+
+    // Never apply a wave across the original-image ROI.
+    bandMask.setTo(0, state.roiMask);
+    if (cv::countNonZero(bandMask) == 0) return output;
+
+    const double additionalSigma =
+        options.waveBlurExtraMin +
+        (options.waveBlurExtraMax - options.waveBlurExtraMin) *
+        parameters.gazeDistance01;
+    const double waveSigma = options.baseBlurSigma + additionalSigma;
+
+    cv::Mat strongerBlur;
+    cv::GaussianBlur(
+        input, strongerBlur, cv::Size(0, 0),
+        waveSigma, waveSigma, cv::BORDER_REFLECT_101
+    );
+
+    // Blend the stronger blur only in the bands. Use the antialiased
+    // coverage as alpha to avoid a hard edge at the annulus boundaries.
+    for (int y = 0; y < output.rows; ++y) {
+        const auto* mask = bandMask.ptr<std::uint8_t>(y);
+        const auto* strong = strongerBlur.ptr<cv::Vec3b>(y);
+        auto* base = output.ptr<cv::Vec3b>(y);
+        for (int x = 0; x < output.cols; ++x) {
+            if (mask[x] == 0) continue;
+            const float alpha = static_cast<float>(mask[x]) / 255.0f;
+            for (int channel = 0; channel < 3; ++channel) {
+                base[x][channel] = cv::saturate_cast<std::uint8_t>(
+                    (1.0f - alpha) * base[x][channel] +
+                    alpha * strong[x][channel]
+                );
+            }
+        }
+    }
+
+    return output;
+}
+
 // Only outside-ROI pixels are darkened, keeping the ROI unchanged.
 cv::Mat renderDarkenedEye(
     const cv::Mat& input, const FilterState& state, double brightness
@@ -602,12 +691,21 @@ cv::Mat makeDisplayFrame(
     std::ostringstream status;
     status << std::fixed << std::setprecision(2)
            << "filter=" << static_cast<int>(activeFilter)
-           << " (" << filterName(activeFilter) << ")"
-           << " eye=" << eyeName(filterEye)
-           << " sigma=" << filter.currentSigma << " px"
-           << "  angle=" << (parameters.gazeAngleRadians * 180.0 / kPi)
-           << " deg  wave=" << parameters.speedDegreesPerSecond
-           << " deg/s  opacity=" << (parameters.opacity * 100.0) << "%";
+           << " (" << filterName(activeFilter) << ")";
+    if (activeFilter == FilterMode::BlurWave) {
+        const double waveSigma =
+            options.baseBlurSigma + options.waveBlurExtraMin +
+            (options.waveBlurExtraMax - options.waveBlurExtraMin) *
+            parameters.gazeDistance01;
+        status << " baseSigma=" << options.baseBlurSigma
+               << " waveSigma=" << waveSigma;
+    } else {
+        status << " eye=" << eyeName(filterEye)
+               << " sigma=" << filter.currentSigma << " px";
+    }
+    status << " angle=" << (parameters.gazeAngleRadians * 180.0 / kPi)
+           << " deg speed=" << parameters.speedDegreesPerSecond
+           << " deg/s opacity=" << (parameters.opacity * 100.0) << "%";
 
     cv::putText(
         statusBar, status.str(), cv::Point(8, 24),
@@ -727,6 +825,14 @@ int main(int argc, char** argv) {
                             rightFrame, filter, options, parameters, true, false
                         );
                     }
+                    break;
+                case FilterMode::BlurWave:
+                    processedLeft = renderBlurWaveEye(
+                        leftFrame, filter, options, parameters
+                    );
+                    processedRight = renderBlurWaveEye(
+                        rightFrame, filter, options, parameters
+                    );
                     break;
             }
 
