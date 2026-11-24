@@ -19,6 +19,29 @@ constexpr double kSigmaMax = 43.67;
 constexpr double kEyeDistanceMeters = 1.0;
 constexpr char kWindowName[] = "Microsurgical Guidance Filter Viewer";
 
+enum class FilterMode : int {
+    None = 1,
+    BlurAndDynSWAVE = 2,
+    SingleEyeDarken = 3,
+    SingleEyeBlur = 4
+};
+
+enum class Eye { Left, Right };
+
+const char* filterName(FilterMode mode) {
+    switch (mode) {
+        case FilterMode::None: return "None";
+        case FilterMode::BlurAndDynSWAVE: return "Blur+DynSWAVE (both eyes)";
+        case FilterMode::SingleEyeDarken: return "Darken (single eye)";
+        case FilterMode::SingleEyeBlur: return "Blur (single eye)";
+    }
+    return "Unknown";
+}
+
+const char* eyeName(Eye eye) {
+    return eye == Eye::Left ? "left" : "right";
+}
+
 struct Options {
     std::string leftPath;
     std::string rightPath;
@@ -40,6 +63,10 @@ struct Options {
     double maximumOpacity = 0.50;
     double minimumSpeedDps = 5.0;
     double speedMultiplier = 6.0;
+
+    FilterMode initialFilterMode = FilterMode::None;
+    Eye filterEye = Eye::Left;
+    double darkenBrightness = 0.25;
 
     bool blurEnabled = true;
     bool dynswaveEnabled = true;
@@ -70,7 +97,15 @@ struct FilterState {
 void printUsage() {
     std::cout
         << "Usage: MicrosurgicalGuidanceFilterViewer"
-        << " --left LEFT.h264 --right RIGHT.h264 [options]\n\n"
+        << " --left LEFT.mp4 --right RIGHT.mp4 [options]\n\n"
+        << "Filter IDs (keys 1-4 during playback):\n"
+        << "  1  None (both eyes unchanged; default)\n"
+        << "  2  Blur + DynSWAVE on both eyes (original behavior)\n"
+        << "  3  Darken outside ROI in one eye\n"
+        << "  4  Blur outside ROI in one eye\n\n"
+        << "  --filter-id N            Initial filter ID, 1..4 (default: 1)\n"
+        << "  --filter-eye left|right  Eye for filter 3/4 (default: left)\n"
+        << "  --darken-brightness N    Outside ROI brightness % (default: 25)\n"
         << "  --fps N                  Playback FPS (default: 160)\n"
         << "  --max-height N           Maximum height per eye (default: 720)\n"
         << "  --roi X Y                Normalized ROI center (default: 0.5 0.5)\n"
@@ -88,7 +123,8 @@ void printUsage() {
         << "  --no-dynswave            Disable DynSWAVE\n"
         << "  --debug                  Display eye markers and status information\n"
         << "  --help                   Show this help\n\n"
-        << "Mouse on either image: simulated gaze for both eyes. Q / Esc: quit.\n";
+        << "Keys 1-4: switch filter. L / R: choose eye for filter 3/4.\n"
+        << "Mouse: simulated gaze shared by both eyes. Q / Esc: quit.\n";
 }
 
 double parseReal(const std::string& value) {
@@ -109,6 +145,19 @@ int parseInteger(const std::string& value) {
     return parsed;
 }
 
+FilterMode parseFilterMode(int id) {
+    if (id < 1 || id > 4) {
+        throw std::invalid_argument("Filter ID must be in [1,4]");
+    }
+    return static_cast<FilterMode>(id);
+}
+
+Eye parseFilterEye(const std::string& value) {
+    if (value == "left") return Eye::Left;
+    if (value == "right") return Eye::Right;
+    throw std::invalid_argument("--filter-eye must be left or right");
+}
+
 Options parseArguments(int argc, char** argv) {
     Options options;
 
@@ -123,7 +172,13 @@ Options parseArguments(int argc, char** argv) {
 
         if (option == "--left") options.leftPath = next();
         else if (option == "--right") options.rightPath = next();
-        else if (option == "--fps") options.fps = parseReal(next());
+        else if (option == "--filter-id") {
+            options.initialFilterMode = parseFilterMode(parseInteger(next()));
+        } else if (option == "--filter-eye") {
+            options.filterEye = parseFilterEye(next());
+        } else if (option == "--darken-brightness") {
+            options.darkenBrightness = parseReal(next()) / 100.0;
+        } else if (option == "--fps") options.fps = parseReal(next());
         else if (option == "--max-height") options.maxHeight = parseInteger(next());
         else if (option == "--roi") {
             options.roiX01 = parseReal(next());
@@ -193,6 +248,9 @@ Options parseArguments(int argc, char** argv) {
     }
     if (options.minimumSpeedDps < 0 || options.speedMultiplier < 1) {
         throw std::invalid_argument("Invalid DynSWAVE speed");
+    }
+    if (options.darkenBrightness < 0 || options.darkenBrightness > 1) {
+        throw std::invalid_argument("--darken-brightness must be in [0,100]");
     }
     return options;
 }
@@ -371,11 +429,13 @@ cv::Mat renderEye(
     const cv::Mat& input,
     const FilterState& state,
     const Options& options,
-    const FrameParameters& parameters
+    const FrameParameters& parameters,
+    bool applyBlur,
+    bool applyDynSWAVE
 ) {
     cv::Mat output;
 
-    if (options.blurEnabled && state.currentSigma > 0.001) {
+    if (applyBlur && options.blurEnabled && state.currentSigma > 0.001) {
         const double sigma = state.currentSigma;
         const int kernel = 2 * static_cast<int>(std::ceil(2.0 * sigma)) + 1;
         cv::GaussianBlur(
@@ -391,7 +451,7 @@ cv::Mat renderEye(
     // ROI always uses the unfiltered source image.
     input.copyTo(output, state.roiMask);
 
-    if (!options.dynswaveEnabled ||
+    if (!applyDynSWAVE || !options.dynswaveEnabled ||
         parameters.gazeInsideRoi ||
         parameters.opacity <= 0.0) {
         return output;
@@ -454,6 +514,16 @@ cv::Mat renderEye(
     return output;
 }
 
+// Only outside-ROI pixels are darkened, keeping the ROI unchanged.
+cv::Mat renderDarkenedEye(
+    const cv::Mat& input, const FilterState& state, double brightness
+) {
+    cv::Mat output;
+    input.convertTo(output, -1, brightness);
+    input.copyTo(output, state.roiMask);
+    return output;
+}
+
 void drawEyeMarker(cv::Mat& image, const cv::Point& gaze) {
     cv::ellipse(
         image, gaze, cv::Size(16, 9), 0, 0, 360,
@@ -479,6 +549,8 @@ cv::Mat makeDisplayFrame(
     const Options& options,
     const FilterState& filter,
     const FrameParameters& parameters,
+    FilterMode activeFilter,
+    Eye filterEye,
     const cv::Point& gaze
 ) {
     cv::Mat left = processedLeft;
@@ -499,7 +571,10 @@ cv::Mat makeDisplayFrame(
     cv::Mat statusBar(36, combined.cols, CV_8UC3, cv::Scalar(25, 25, 25));
     std::ostringstream status;
     status << std::fixed << std::setprecision(2)
-           << "sigma=" << filter.currentSigma << " px"
+           << "filter=" << static_cast<int>(activeFilter)
+           << " (" << filterName(activeFilter) << ")"
+           << " eye=" << eyeName(filterEye)
+           << " sigma=" << filter.currentSigma << " px"
            << "  angle=" << (parameters.gazeAngleRadians * 180.0 / kPi)
            << " deg  wave=" << parameters.speedDegreesPerSecond
            << " deg/s  opacity=" << (parameters.opacity * 100.0) << "%";
@@ -536,6 +611,15 @@ int main(int argc, char** argv) {
         checkStereoFrames(leftFrame, rightFrame);
 
         FilterState filter = initializeFilter(leftFrame.size(), options);
+        FilterMode activeFilter = options.initialFilterMode;
+        Eye filterEye = options.filterEye;
+
+        auto logFilter = [&]() {
+            std::cout << "Filter ID " << static_cast<int>(activeFilter)
+                      << " = " << filterName(activeFilter)
+                      << " ; single-eye target: " << eyeName(filterEye)
+                      << '\n';
+        };
 
         MouseState mouse;
         mouse.eyeWidth = leftFrame.cols;
@@ -550,7 +634,8 @@ int main(int argc, char** argv) {
                   << leftFrame.rows << '\n'
                   << "Reachable max sigma: " << filter.maximumSigma << " px\n"
                   << "Mouse: simulated gaze (shared by both eyes)\n"
-                  << "Q / Esc: exit\n";
+                  << "Keys: 1-4 = filter, L/R = eye, Q/Esc = exit\n";
+        logFilter();
 
         cv::namedWindow(kWindowName, cv::WINDOW_AUTOSIZE);
         cv::setMouseCallback(kWindowName, onMouse, &mouse);
@@ -576,21 +661,74 @@ int main(int argc, char** argv) {
             const FrameParameters parameters = updateFilter(
                 filter, options, gaze, dt
             );
-            const cv::Mat processedLeft =
-                renderEye(leftFrame, filter, options, parameters);
-            const cv::Mat processedRight =
-                renderEye(rightFrame, filter, options, parameters);
+
+            // ID 2: old bilateral guidance. IDs 3/4: one eye only.
+            cv::Mat processedLeft = leftFrame;
+            cv::Mat processedRight = rightFrame;
+            switch (activeFilter) {
+                case FilterMode::None:
+                    break;
+                case FilterMode::BlurAndDynSWAVE:
+                    processedLeft = renderEye(
+                        leftFrame, filter, options, parameters, true, true
+                    );
+                    processedRight = renderEye(
+                        rightFrame, filter, options, parameters, true, true
+                    );
+                    break;
+                case FilterMode::SingleEyeDarken:
+                    if (filterEye == Eye::Left) {
+                        processedLeft = renderDarkenedEye(
+                            leftFrame, filter, options.darkenBrightness
+                        );
+                    } else {
+                        processedRight = renderDarkenedEye(
+                            rightFrame, filter, options.darkenBrightness
+                        );
+                    }
+                    break;
+                case FilterMode::SingleEyeBlur:
+                    if (filterEye == Eye::Left) {
+                        processedLeft = renderEye(
+                            leftFrame, filter, options, parameters, true, false
+                        );
+                    } else {
+                        processedRight = renderEye(
+                            rightFrame, filter, options, parameters, true, false
+                        );
+                    }
+                    break;
+            }
 
             cv::imshow(
                 kWindowName,
                 makeDisplayFrame(
                     processedLeft, processedRight,
-                    options, filter, parameters, gaze
+                    options, filter, parameters,
+                    activeFilter, filterEye, gaze
                 )
             );
 
             const int key = cv::waitKey(1) & 0xff;
             if (key == 27 || key == 'q' || key == 'Q') break;
+            if (key >= '1' && key <= '4') {
+                const auto requestedMode = static_cast<FilterMode>(key - '0');
+                if (requestedMode != activeFilter) {
+                    activeFilter = requestedMode;
+                    filter.wavePhaseRadians = 0.0;
+                    logFilter();
+                }
+            } else if (key == 'l' || key == 'L') {
+                if (filterEye != Eye::Left) {
+                    filterEye = Eye::Left;
+                    logFilter();
+                }
+            } else if (key == 'r' || key == 'R') {
+                if (filterEye != Eye::Right) {
+                    filterEye = Eye::Right;
+                    logFilter();
+                }
+            }
             if (cv::getWindowProperty(
                     kWindowName, cv::WND_PROP_VISIBLE) < 1.0) {
                 break;
