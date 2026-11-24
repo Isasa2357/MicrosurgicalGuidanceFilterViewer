@@ -32,10 +32,21 @@ RWTexture2D<float4> Destination : register(u0);
 float closestRingDistance(float pixelRadius)
 {
     float distance = 1e20;
+
+    // HLSL FXC may unroll dynamic vector indexing and evaluate i - 4 for
+    // i < 4 (unsigned underflow), even inside a conditional expression.
+    // Select the packed float4 first, then use named components only.
     [loop]
-    for (uint i = 0; i < RingCount; ++i)
+    for (uint i = 0; i < min(RingCount, 8u); ++i)
     {
-        float ringRadius = i < 4 ? RingRadii0[i] : RingRadii1[i - 4];
+        float4 packedRadii = i < 4u ? RingRadii0 : RingRadii1;
+        uint component = i & 3u;
+        float ringRadius;
+        if (component == 0u)      ringRadius = packedRadii.x;
+        else if (component == 1u) ringRadius = packedRadii.y;
+        else if (component == 2u) ringRadius = packedRadii.z;
+        else                      ringRadius = packedRadii.w;
+
         distance = min(distance, abs(pixelRadius - ringRadius));
     }
     return distance;
