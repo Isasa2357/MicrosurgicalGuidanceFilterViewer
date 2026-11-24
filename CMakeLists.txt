@@ -56,8 +56,24 @@ endforeach()
 
 add_executable(MicrosurgicalGuidanceFilterViewer main.cpp)
 
+# OpenCV's build-tree module targets use PRIVATE include paths, so consumers
+# in a parent FetchContent project must explicitly include public module headers.
+# OPENCV_CONFIG_FILE_INCLUDE_DIR points to the build-generated headers,
+# including opencv2/opencv_modules.hpp (normally the top-level build directory).
+if(NOT EXISTS "${OPENCV_CONFIG_FILE_INCLUDE_DIR}/opencv2/opencv_modules.hpp")
+    message(FATAL_ERROR
+        "OpenCV generated header was not found: "
+        "${OPENCV_CONFIG_FILE_INCLUDE_DIR}/opencv2/opencv_modules.hpp")
+endif()
+
 target_include_directories(MicrosurgicalGuidanceFilterViewer SYSTEM PRIVATE
     "${opencv_SOURCE_DIR}/include"
+    "${OPENCV_CONFIG_FILE_INCLUDE_DIR}"
+    "${opencv_SOURCE_DIR}/modules/core/include"
+    "${opencv_SOURCE_DIR}/modules/imgproc/include"
+    "${opencv_SOURCE_DIR}/modules/imgcodecs/include"
+    "${opencv_SOURCE_DIR}/modules/videoio/include"
+    "${opencv_SOURCE_DIR}/modules/highgui/include"
 )
 
 target_link_libraries(MicrosurgicalGuidanceFilterViewer PRIVATE
