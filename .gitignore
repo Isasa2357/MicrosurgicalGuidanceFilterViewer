@@ -1,6 +1,7 @@
 # Build artifacts
 build/
 build-fetch/
+build-vs2026/
 out/
 cmake-build-*/
 CMakeFiles/
